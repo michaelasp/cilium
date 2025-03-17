@@ -30,6 +30,7 @@ import (
 var (
 	remoteConnectionControllerGroup = controller.NewGroup("clustermesh-remote-cluster")
 	clusterConfigControllerGroup    = controller.NewGroup("clustermesh-cluster-config")
+	defaultTimeout                  = time.Minute
 )
 
 type RemoteCluster interface {
@@ -140,6 +141,18 @@ func (rc *remoteCluster) restartRemoteConnection() {
 			DoFunc: func(ctx context.Context) error {
 				rc.releaseOldConnection()
 
+				timeout := make(chan error)
+				go func() {
+					timer := time.NewTimer(defaultTimeout)
+					defer timer.Stop()
+					select {
+					case <-timer.C:
+						timeout <- fmt.Errorf("client connection timeout")
+					case <-ctx.Done():
+						timeout <- ctx.Err()
+					}
+				}()
+
 				clusterLock := rc.clusterLockFactory()
 				extraOpts := rc.makeExtraOpts(clusterLock)
 				backend, errChan := rc.backendFactory(ctx, rc.logger, kvstore.EtcdBackendName, rc.makeEtcdOpts(), &extraOpts)
@@ -153,6 +166,8 @@ func (rc *remoteCluster) restartRemoteConnection() {
 				select {
 				case err = <-errChan:
 				case err = <-clusterLock.errors:
+				case err = <-timeout:
+					rc.Remove(ctx)
 				}
 
 				if err != nil {
